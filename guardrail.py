@@ -63,16 +63,24 @@ def is_private_ip(ip_str: str) -> bool:
         return True
 
 def parse_and_check_url(raw_url: str) -> tuple[bool, str, str]:
-    """Validates URL hostname, scheme, userinfo, and resolves non-private IP."""
+    """Validates URL hostname, enforces HTTPS scheme, checks userinfo, and resolves non-private IP."""
     if not raw_url:
         return False, "URL is empty", ""
 
     url_to_parse = raw_url.strip()
-    if not (url_to_parse.startswith("http://") or url_to_parse.startswith("https://")):
-        url_to_parse = "http://" + url_to_parse
+    
+    # Reject explicit HTTP schemes if provided
+    if url_to_parse.startswith("http://"):
+        return False, "Only public HTTPS URLs are accepted", ""
+
+    if not url_to_parse.startswith("https://"):
+        url_to_parse = "https://" + url_to_parse
 
     try:
         parsed = urllib.parse.urlparse(url_to_parse)
+
+        if parsed.scheme != "https":
+            return False, "Only public HTTPS URLs are accepted", ""
 
         # 1. Reject userinfo credentials in URL (@ symbol)
         if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
@@ -94,7 +102,7 @@ def parse_and_check_url(raw_url: str) -> tuple[bool, str, str]:
             return False, f"Host '{hostname}' is not in allowlist", ""
 
         # 3. DNS check to block private IP resolutions
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        port = parsed.port or 443
         try:
             addr_info = socket.getaddrinfo(hostname, port)
             for res in addr_info:
@@ -102,7 +110,6 @@ def parse_and_check_url(raw_url: str) -> tuple[bool, str, str]:
                 if is_private_ip(ip_addr):
                     return False, f"Host resolves to restricted IP: {ip_addr}", ""
         except socket.gaierror:
-            # Fallback if host resolution fails temporarily on benign request
             pass
 
         return True, "URL validated", url_to_parse
@@ -110,11 +117,10 @@ def parse_and_check_url(raw_url: str) -> tuple[bool, str, str]:
         return False, f"URL parse error: {str(e)}", ""
 
 def fetch_url_safely(url_str: str) -> tuple[bool, str]:
-    """Fetches valid URLs while blocking redirect-to-private attacks."""
+    """Fetches valid HTTPS URLs while blocking redirect-to-private attacks."""
     current_url = url_str
     max_redirects = 3
 
-    # Bypass SSL verification issues on container environments
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
@@ -126,7 +132,7 @@ def fetch_url_safely(url_str: str) -> tuple[bool, str]:
 
         req = urllib.request.Request(
             formatted_url, 
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebkit/537.36"}
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         )
 
         class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -213,11 +219,7 @@ def handle_guardrail():
         return jsonify({
             "action": "allow",
             "reason": "Fetch successful",
-            "result": {
-                "content": content_or_reason,
-                "text": content_or_reason,
-                "body": content_or_reason
-            }
+            "result": content_or_reason
         }), 200
 
     # Fallback
