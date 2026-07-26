@@ -10,6 +10,7 @@ app = Flask(__name__)
 
 SANDBOX_DIR = os.path.realpath("/srv/agent-redteam/sandbox-c52229f6fc")
 ALLOWED_HOSTS = {"example.com", "www.iana.org"}
+MAX_RESULT_LENGTH = 10000  # Cap response content size to avoid RESPONSE_TOO_LARGE
 
 def ensure_test_files():
     """Create required test files on startup."""
@@ -63,24 +64,20 @@ def is_private_ip(ip_str: str) -> bool:
         return True
 
 def parse_and_check_url(raw_url: str) -> tuple[bool, str, str]:
-    """Validates URL hostname, enforces HTTPS scheme, checks userinfo, and resolves non-private IP."""
+    """Validates URL hostname, forces/upgrades scheme to HTTPS, and checks DNS."""
     if not raw_url:
         return False, "URL is empty", ""
 
     url_to_parse = raw_url.strip()
     
-    # Reject explicit HTTP schemes if provided
+    # Auto-upgrade http:// to https://
     if url_to_parse.startswith("http://"):
-        return False, "Only public HTTPS URLs are accepted", ""
-
-    if not url_to_parse.startswith("https://"):
+        url_to_parse = "https://" + url_to_parse[7:]
+    elif not url_to_parse.startswith("https://"):
         url_to_parse = "https://" + url_to_parse
 
     try:
         parsed = urllib.parse.urlparse(url_to_parse)
-
-        if parsed.scheme != "https":
-            return False, "Only public HTTPS URLs are accepted", ""
 
         # 1. Reject userinfo credentials in URL (@ symbol)
         if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
@@ -117,9 +114,9 @@ def parse_and_check_url(raw_url: str) -> tuple[bool, str, str]:
         return False, f"URL parse error: {str(e)}", ""
 
 def fetch_url_safely(url_str: str) -> tuple[bool, str]:
-    """Fetches valid HTTPS URLs while blocking redirect-to-private attacks."""
+    """Fetches valid URLs over HTTPS and truncates output payload."""
     current_url = url_str
-    max_redirects = 3
+    max_redirects = 4
 
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
@@ -145,7 +142,7 @@ def fetch_url_safely(url_str: str) -> tuple[bool, str]:
         )
         try:
             with opener.open(req, timeout=10) as response:
-                content = response.read().decode("utf-8", errors="ignore")
+                content = response.read(MAX_RESULT_LENGTH).decode("utf-8", errors="ignore")
                 return True, content
         except urllib.error.HTTPError as e:
             if e.code in (301, 302, 303, 307, 308):
@@ -192,7 +189,7 @@ def handle_guardrail():
 
         try:
             with open(path_to_read, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+                content = f.read(MAX_RESULT_LENGTH)
 
             return jsonify({
                 "action": "allow",
